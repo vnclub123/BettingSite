@@ -23,7 +23,15 @@ export default function Game() {
     const lastShownRoundIdRef = useRef(null);
     const fetchTimeoutRef = useRef(null);
     const tickIntervalRef = useRef(null);
-    const serverOffsetRef = useRef(null);
+    const serverOffsetMsRef = useRef(null);
+
+    // Calculate exact time left in current round based on synchronized clock
+    const getCalculatedTimeLeft = () => {
+        const offsetMs = serverOffsetMsRef.current !== null ? serverOffsetMsRef.current : 0;
+        const now = Date.now() + offsetMs;
+        const secondsInRound = Math.floor(now / 1000) % 60;
+        return 60 - secondsInRound;
+    };
 
     const scheduleNextFetch = (delay) => {
         if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
@@ -36,22 +44,15 @@ export default function Game() {
         fetchUser();
         fetchNotifications();
 
+        // Initial immediate time set
+        setTimeLeft(getCalculatedTimeLeft());
+
         // Initial game data fetch
         fetchGameData();
 
-        // Smooth client-side countdown tick every 1 second (no jitter/back-and-forth)
+        // Smooth client-side countdown tick every 1 second (continuous, drift-free)
         tickIntervalRef.current = setInterval(() => {
-            const clientTimeLeft = 60 - (Math.floor(Date.now() / 1000) % 60);
-            const offset = serverOffsetRef.current !== null ? serverOffsetRef.current : 0;
-            
-            let adjustedTimeLeft = clientTimeLeft + offset;
-            if (adjustedTimeLeft <= 0) {
-                adjustedTimeLeft = 60 + (adjustedTimeLeft % 60);
-            } else if (adjustedTimeLeft > 60) {
-                adjustedTimeLeft = ((adjustedTimeLeft - 1) % 60) + 1;
-            }
-            
-            setTimeLeft(adjustedTimeLeft);
+            setTimeLeft(getCalculatedTimeLeft());
         }, 1000);
 
         return () => {
@@ -82,18 +83,35 @@ export default function Game() {
 
     const fetchGameData = async () => {
         try {
+            const fetchStartTime = Date.now();
             const data = await api.getCurrentRound();
+            const fetchEndTime = Date.now();
+
             if (!data.roundId) {
                 scheduleNextFetch(5000);
                 return;
             }
 
-            // Sync server offset (ignore network latency jitter unless drift is > 2 seconds)
-            const clientTimeLeft = 60 - (Math.floor(Date.now() / 1000) % 60);
-            const calculatedOffset = data.timeLeft - clientTimeLeft;
-            if (serverOffsetRef.current === null || Math.abs(serverOffsetRef.current - calculatedOffset) > 2) {
-                serverOffsetRef.current = calculatedOffset;
+            // Sync server offset accurately using serverTime or timeLeft
+            let estimatedServerNow;
+            if (typeof data.serverTime === 'number') {
+                const latency = Math.max(0, (fetchEndTime - fetchStartTime) / 2);
+                estimatedServerNow = data.serverTime + latency;
+            } else if (typeof data.timeLeft === 'number') {
+                const roundStart = Math.floor(fetchEndTime / 60000) * 60000;
+                estimatedServerNow = roundStart + (60 - data.timeLeft) * 1000;
             }
+
+            if (estimatedServerNow !== undefined) {
+                const measuredOffsetMs = estimatedServerNow - fetchEndTime;
+                // Initialize on first load, or update only if real clock drift exceeds 3 seconds
+                if (serverOffsetMsRef.current === null || Math.abs(serverOffsetMsRef.current - measuredOffsetMs) > 3000) {
+                    serverOffsetMsRef.current = measuredOffsetMs;
+                }
+            }
+
+            // Update timer state
+            setTimeLeft(getCalculatedTimeLeft());
 
             // Initialize lastShownRoundIdRef to the previous round on first load
             if (lastShownRoundIdRef.current === null) {
@@ -121,13 +139,14 @@ export default function Game() {
             setRoundId(data.roundId);
             setLastResults(data.lastResults || []);
 
-            // Decide next fetch delay:
+            // Decide next fetch delay based on current real-time progress:
             // Fast poll (1s) in 3 windows:
             //  1. Last 8 seconds of a round — catches result the moment it lands
             //  2. First 5 seconds of a new round — catches late-arriving result instantly
             //  3. Any time we're still waiting for a result from a previous round
-            const isNewRound = data.timeLeft > 55;           // round just flipped
-            const isEndOfRound = data.timeLeft <= 8;          // about to end
+            const currentTimeLeft = getCalculatedTimeLeft();
+            const isNewRound = currentTimeLeft > 55;           // round just flipped
+            const isEndOfRound = currentTimeLeft <= 8;          // about to end
             const isWaitingForResult = latestResult === null || latestResult.roundId < (data.roundId - 1);
 
             if (isEndOfRound || isNewRound || isWaitingForResult) {

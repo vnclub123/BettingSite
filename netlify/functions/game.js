@@ -17,13 +17,13 @@ const headers = {
     'Access-Control-Allow-Credentials': 'true',
 };
 
-// Cache headers for read-only endpoints (GET /current)
-// CDN caches the response for 5s — 20 users polling at the same time all
-// get one shared cached response instead of 20 separate function calls.
-// 5s is short enough that the 60s round timer stays accurate within ±5s.
-const cachedHeaders = {
+// No-cache headers for dynamic game state (GET /current)
+// Must NEVER be cached by CDN or browser to prevent timer jitter and delayed results
+const noCacheHeaders = {
     ...headers,
-    'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=2',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
 };
 
 // Helper to get current round ID
@@ -49,8 +49,9 @@ export const handler = async (event) => {
     try {
         // GET /current - Get current round info
         if (event.httpMethod === 'GET' && path === '/current') {
-            const currentRoundId = getCurrentRoundId();
-            const timeLeft = getTimeLeft();
+            const now = Date.now();
+            const currentRoundId = Math.floor(now / 60000);
+            const timeLeft = 60 - (Math.floor(now / 1000) % 60);
 
             // Get last 20 results (excluding the active round if already generated/set)
             const lastResults = await Round.find({
@@ -64,10 +65,11 @@ export const handler = async (event) => {
 
             return {
                 statusCode: 200,
-                headers: cachedHeaders,   // CDN-cached for 5s
+                headers: noCacheHeaders,
                 body: JSON.stringify({
                     roundId: currentRoundId,
                     timeLeft,
+                    serverTime: now,
                     lastResults: lastResults.map(r => ({
                         roundId: r.roundId,
                         result: r.result,

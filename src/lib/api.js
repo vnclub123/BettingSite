@@ -39,7 +39,9 @@ export const api = {
 
     // Game
     getCurrentRound: async () => {
-        const res = await fetch(`${API_BASE}/game/current`);
+        const res = await fetch(`${API_BASE}/game/current`, {
+            cache: 'no-store',
+        });
         return res.json();
     },
 
